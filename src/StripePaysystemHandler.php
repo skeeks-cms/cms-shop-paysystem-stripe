@@ -8,18 +8,16 @@
 
 namespace skeeks\cms\shop\stripe;
 
-use skeeks\cms\helpers\StringHelper;
 use skeeks\cms\shop\models\ShopOrder;
 use skeeks\cms\shop\models\ShopPayment;
 use skeeks\cms\shop\paysystem\PaysystemHandler;
-use skeeks\yii2\form\fields\BoolField;
 use skeeks\yii2\form\fields\FieldSet;
 use yii\base\Exception;
 use yii\helpers\ArrayHelper;
-use yii\helpers\Url;
-use yii\httpclient\Client;
 
 /**
+ * @see https://stripe.com/docs/testing
+ *
  * @author Semenov Alexander <semenov@skeeks.com>
  */
 class StripePaysystemHandler extends PaysystemHandler
@@ -90,144 +88,56 @@ class StripePaysystemHandler extends PaysystemHandler
     {
         $model = $this->getShopBill($shopOrder);
 
-        $yooKassa = $model->shopPaySystem->handler;
-        $money = $model->money->convertToCurrency("RUB");
-        $returnUrl = $shopOrder->getUrl([], true);
+        $paysystem = $model->shopPaySystem->handler;
+        $price = (float)$model->money->amount;
+
         $successUrl = $shopOrder->getUrl(['success_paied' => true], true);
         $failUrl = $shopOrder->getUrl(['fail_paied' => true], true);
 
-        /**
-         * Для чеков нужно указывать информацию о товарах
-         * https://yookassa.ru/developers/api?lang=php#create_payment
-         */
-
-        $data = [
-            'TerminalKey'     => $this->terminal_key,
-            'Amount'          => $money->amount * 100,
-            'OrderId'         => $model->id,
-            'Description'     => $model->description,
-            'NotificationURL' => Url::to(['/tinkoff/tinkoff/notify'], true),
-            'SuccessURL'      => $successUrl,
-            'FailURL'         => $failUrl,
+        $stripe = new \Stripe\StripeClient(
+            $this->api_key
+        );
+        $payData = [
+            'success_url' => $successUrl,
+            'cancel_url'  => $failUrl,
+            'line_items'  => [
+                [
+                    'price_data' => [
+                        'currency'            => 'eur',
+                        'unit_amount_decimal' => $shopOrder->money->amount * 100,
+                        'product_data'        => [
+                            'name' => 'Order №'.$shopOrder->id,
+                        ],
+                    ],
+                    'quantity'   => 1,
+                ],
+            ],
+            'mode'        => 'payment',
         ];
 
-
-        $receipt = [];
-        if ($yooKassa->is_receipt) {
-
-            $receipt['Email'] = \Yii::$app->cms->adminEmail;
-            if (trim($shopOrder->contact_email)) {
-                $receipt['Email'] = trim($shopOrder->contact_email);
-            }
-            $receipt['Taxation'] = "usn_income"; //todo: вынести в настройки
-
-            foreach ($shopOrder->shopOrderItems as $shopOrderItem) {
-                $itemData = [];
-
-                /**
-                 * @see https://www.tinkoff.ru/kassa/develop/api/payments/init-request/#Items
-                 */
-                $itemData['Name'] = StringHelper::substr($shopOrderItem->name, 0, 128);
-                $itemData['Quantity'] = (float)$shopOrderItem->quantity;
-                $itemData['Tax'] = "none"; //todo: доработать этот момент
-                $itemData['Price'] = $shopOrderItem->money->amount * 100;
-                $itemData['Amount'] = $shopOrderItem->money->amount * $shopOrderItem->quantity * 100;
-
-                $receipt['Items'][] = $itemData;
-            }
-
-            /**
-             * Стоимость доставки так же нужно добавить
-             */
-            if ((float)$shopOrder->moneyDelivery->amount > 0) {
-                $itemData = [];
-                $itemData['Name'] = StringHelper::substr($shopOrder->shopDelivery->name, 0, 128);
-                $itemData['Quantity'] = 1;
-                $itemData['Tax'] = "none";
-                $itemData['Amount'] = $shopOrder->moneyDelivery->amount * 100;
-                $itemData['Price'] = $shopOrder->moneyDelivery->amount * 100;
-
-                $receipt['Items'][] = $itemData;
-            }
-
-            $totalCalcAmount = 0;
-            foreach ($receipt['Items'] as $itemData) {
-                $totalCalcAmount = $totalCalcAmount + ($itemData['Amount'] * $itemData['Quantity']);
-            }
-
-            $discount = 0;
-            if ($totalCalcAmount > (float)$money->amount) {
-                $discount = abs((float)$money->amount - $totalCalcAmount);
-            }
-
-            /**
-             * Стоимость скидки
-             */
-            //todo: тут можно еще подумать, это временное решение
-            if ($discount > 0 && 1 == 2) {
-                $discountValue = $discount;
-                foreach ($receipt['items'] as $key => $item) {
-                    if ($discountValue == 0) {
-                        break;
-                    }
-                    if ($item['amount']['value']) {
-                        if ($item['amount']['value'] >= $discountValue) {
-                            $item['amount']['value'] = $item['amount']['value'] - $discountValue;
-                            $discountValue = 0;
-                        } else {
-                            $item['amount']['value'] = 0;
-                            $discountValue = $discountValue - $item['amount']['value'];
-                        }
-                    }
-
-                    $receipt['items'][$key] = $item;
-                }
-                //$receipt['items'][] = $itemData;
-
-
-            }
-
-
-            $data["Receipt"] = $receipt;
+        if ($shopOrder->contact_email) {
+            $payData['customer_email'] = $shopOrder->contact_email;
         }
 
+        \Yii::info("request: ".print_r($payData, true), self::class);
 
-
-        $email = null;
-        $phone = null;
-        if ($model->shopOrder && $model->shopOrder->contact_email) {
-            $data["DATA"]["Email"] = $model->shopOrder->contact_email;
+        try {
+            $result = $stripe->checkout->sessions->create($payData);
+        } catch (\Exception $exception) {
+            \Yii::error(print_r($exception->getMessage(), true), self::class);
+            throw $exception;
         }
 
-        //print_r($data);die;
+        \Yii::info("response: ".print_r($result, true), self::class);
 
-        $client = new Client();
-        $request = $client
-            ->post($this->tinkoff_url."Init")
-            ->setFormat(Client::FORMAT_JSON)
-            ->setData($data);
-        ;
 
-        \Yii::info(print_r($data, true), self::class);
-
-        $response = $request->send();
-        if (!$response->isOk) {
-            \Yii::error($response->content, self::class);
-            throw new Exception('Tinkoff api not found');
-        }
-
-        if (!ArrayHelper::getValue($response->data, "PaymentId")) {
-            \Yii::error(print_r($response->data, true), self::class);
-            throw new Exception('Tinkoff kassa payment id not found: ' . print_r($response->data, true));
-        }
-
-        $model->external_id = ArrayHelper::getValue($response->data, "PaymentId");
-        $model->external_data = $response->data;
+        $model->external_id = $result->payment_intent;
+        $model->external_data = $result->toArray();
 
         if (!$model->save()) {
             throw new Exception("Не удалось сохранить платеж: ".print_r($model->errors, true));
         }
 
-        return \Yii::$app->response->redirect(ArrayHelper::getValue($response->data, "PaymentURL"));
+        return \Yii::$app->response->redirect($result->url);
     }
 }

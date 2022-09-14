@@ -13,7 +13,7 @@ return [
             'targets' => [
                 [
                     'class'      => 'yii\log\FileTarget',
-                    'levels'     => ['info'],
+                    'levels'     => ['info', 'warning', 'error'],
                     'logVars'    => [],
                     'categories' => [\skeeks\cms\shop\stripe\controllers\StripeController::class, \skeeks\cms\shop\stripe\StripePaysystemHandler::class],
                     'logFile'    => '@runtime/logs/stripe-info.log',
